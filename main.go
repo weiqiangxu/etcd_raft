@@ -17,7 +17,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("etcd boot success")
 	defer func(cli *clientV3.Client) {
 		err := cli.Close()
 		if err != nil {
@@ -42,6 +41,7 @@ func NewLeasesLock(client *clientV3.Client, ip string) error {
 		return err
 	}
 	leaseId := leaseGrantResponse.ID
+	fmt.Println("leaseId=", leaseId)
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	defer cancelFunc()
 	// 撤销租约
@@ -56,18 +56,18 @@ func NewLeasesLock(client *clientV3.Client, ip string) error {
 		fmt.Println(err)
 		return err
 	}
-
 	kv := clientV3.NewKV(client)
-	txn := kv.Txn(context.TODO())
-	txn.If(clientV3.Compare(clientV3.CreateRevision("/dev/lock"), "=", 0)).Then(
+	// creates a transaction.
+	transactionObj := kv.Txn(context.TODO())
+	transactionObj.If(clientV3.Compare(clientV3.CreateRevision("/dev/lock"), "=", 0)).Then(
 		clientV3.OpPut("/dev/lock", ip, clientV3.WithLease(leaseId))).Else(
 		clientV3.OpGet("/dev/lock"))
-	txnResponse, err := txn.Commit()
+	transactionResponse, err := transactionObj.Commit()
 	if err != nil {
 		fmt.Println(err)
 		return err
 	}
-	if txnResponse.Succeeded {
+	if transactionResponse.Succeeded {
 		fmt.Println("抢到锁了")
 		fmt.Printf("选定主节点 %s\n", ip)
 		for {
@@ -81,7 +81,7 @@ func NewLeasesLock(client *clientV3.Client, ip string) error {
 			}
 		}
 	} else {
-		fmt.Println("没抢到锁", txnResponse.Responses[0].GetResponseRange().Kvs[0].Value)
+		fmt.Println("没抢到锁", transactionResponse.Responses[0].GetResponseRange().Kvs[0].Value)
 		fmt.Println("继续抢")
 		time.Sleep(time.Second * 1)
 	}
