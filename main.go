@@ -3,55 +3,39 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/prometheus/common/log"
 	"time"
 
-	//"reflect"
-
-	"go.etcd.io/etcd/clientv3"
+	clientV3 "go.etcd.io/etcd/client/v3"
 )
 
-var (
-	lease                  clientv3.Lease
-	ctx                    context.Context
-	cancelFunc             context.CancelFunc
-	leaseId                clientv3.LeaseID
-	leaseGrantResponse     *clientv3.LeaseGrantResponse
-	leaseKeepAliveChan     <-chan *clientv3.LeaseKeepAliveResponse
-	leaseKeepAliveResponse *clientv3.LeaseKeepAliveResponse
-	txn                    clientv3.Txn
-	txnResponse            *clientv3.TxnResponse
-	kv                     clientv3.KV
-)
-
-type ETCD struct {
-	client *clientv3.Client
-	cfg    clientv3.Config
-	err    error
-}
-
-func New(endpoints ...string) (*ETCD, error) {
-	cfg := clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: time.Second * 5,
-	}
-
-	client, err := clientv3.New(cfg)
+func main() {
+	cli, err := clientV3.New(clientV3.Config{
+		Endpoints:   []string{"127.0.0.1:2379"},
+		DialTimeout: 5 * time.Second,
+	})
 	if err != nil {
-		fmt.Println("连接ETCD失败")
-		return nil, err
+		panic(err)
 	}
-
-	etcd := &ETCD{
-		cfg:    cfg,
-		client: client,
+	fmt.Println("etcd boot success")
+	defer func(cli *clientV3.Client) {
+		err := cli.Close()
+		if err != nil {
+			log.Error(err)
+		}
+	}(cli)
+	for {
+		err := NewLeasesLock(cli, "node1")
+		if err != nil {
+			return
+		}
 	}
-
-	fmt.Println("连接ETCD成功")
-	return etcd, nil
 }
 
-func (etcd *ETCD) NewLeasesLock(ip string) error {
-	lease := clientv3.NewLease(etcd.client)
+// NewLeasesLock new release
+func NewLeasesLock(client *clientV3.Client, ip string) error {
+	// 创建新的租约
+	lease := clientV3.NewLease(client)
 	leaseGrantResponse, err := lease.Grant(context.TODO(), 5)
 	if err != nil {
 		fmt.Println(err)
@@ -60,18 +44,24 @@ func (etcd *ETCD) NewLeasesLock(ip string) error {
 	leaseId := leaseGrantResponse.ID
 	ctx, cancelFunc := context.WithCancel(context.TODO())
 	defer cancelFunc()
-	defer lease.Revoke(context.TODO(), leaseId)
+	// 撤销租约
+	defer func(lease clientV3.Lease, ctx context.Context, id clientV3.LeaseID) {
+		_, err := lease.Revoke(ctx, id)
+		if err != nil {
+			log.Error(err)
+		}
+	}(lease, context.TODO(), leaseId)
 	leaseKeepAliveChan, err := lease.KeepAlive(ctx, leaseId)
 	if err != nil {
 		fmt.Println(err)
 		return err
 	}
 
-	kv := clientv3.NewKV(etcd.client)
+	kv := clientV3.NewKV(client)
 	txn := kv.Txn(context.TODO())
-	txn.If(clientv3.Compare(clientv3.CreateRevision("/dev/lock"), "=", 0)).Then(
-		clientv3.OpPut("/dev/lock", ip, clientv3.WithLease(leaseId))).Else(
-		clientv3.OpGet("/dev/lock"))
+	txn.If(clientV3.Compare(clientV3.CreateRevision("/dev/lock"), "=", 0)).Then(
+		clientV3.OpPut("/dev/lock", ip, clientV3.WithLease(leaseId))).Else(
+		clientV3.OpGet("/dev/lock"))
 	txnResponse, err := txn.Commit()
 	if err != nil {
 		fmt.Println(err)
@@ -82,13 +72,12 @@ func (etcd *ETCD) NewLeasesLock(ip string) error {
 		fmt.Printf("选定主节点 %s\n", ip)
 		for {
 			select {
-			case leaseKeepAliveResponse = <-leaseKeepAliveChan:
+			case leaseKeepAliveResponse := <-leaseKeepAliveChan:
 				if leaseKeepAliveResponse != nil {
 					fmt.Println("续租成功,leaseID :", leaseKeepAliveResponse.ID)
 				} else {
 					fmt.Println("续租失败")
 				}
-
 			}
 		}
 	} else {
@@ -97,14 +86,4 @@ func (etcd *ETCD) NewLeasesLock(ip string) error {
 		time.Sleep(time.Second * 1)
 	}
 	return nil
-}
-
-func main() {
-	etcd, err := New("127.0.0.1:2379")
-	if err != nil {
-		fmt.Println(err)
-	}
-	for {
-		etcd.NewLeasesLock("node1")
-	}
 }
